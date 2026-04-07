@@ -9,20 +9,22 @@ type FutureEvent struct {
 }
 
 // NewFutureEvent 创建一个FutureEvent, 并返回其指针
-func NewFutureEvent(Type string, Priority int, Block bool, rule ...Rule) *FutureEvent {
+func NewFutureEvent(typ string, priority int, block bool, rule ...Rule) *FutureEvent {
 	return &FutureEvent{
-		Type:     Type,
-		Priority: Priority,
+		Type:     typ,
+		Priority: priority,
 		Rule:     rule,
-		Block:    Block,
+		Block:    block,
 	}
 }
 
 // FutureEvent 返回一个 FutureEvent 实例指针，用于获取满足 Rule 的 未来事件
-func (m *Matcher) FutureEvent(Type string, rule ...Rule) *FutureEvent {
+//
+// 此 FutureEvent 必然比 Matcher 之优先级少 1
+func (m *Matcher) FutureEvent(typ string, rule ...Rule) *FutureEvent {
 	return &FutureEvent{
-		Type:     Type,
-		Priority: m.Priority,
+		Type:     typ,
+		Priority: m.Priority - 1,
 		Block:    m.Block,
 		Rule:     rule,
 	}
@@ -39,10 +41,14 @@ func (n *FutureEvent) Next() <-chan *Ctx {
 		Priority: n.Priority,
 		Rules:    n.Rule,
 		Engine:   defaultEngine,
-		Handler: func(ctx *Ctx) {
-			ch <- ctx
-			close(ch)
-		},
+		Handler: []Handler{func(ctx *Ctx) {
+			// 使用 go func 异步发送，确保不阻塞主线程
+			go func() {
+				defer func() { _ = recover() }()
+				ch <- ctx
+				close(ch)
+			}()
+		}},
 	})
 	return ch
 }
@@ -51,7 +57,8 @@ func (n *FutureEvent) Next() <-chan *Ctx {
 //
 // 如果没有取消监听，将不断监听指定事件
 func (n *FutureEvent) Repeat() (recv <-chan *Ctx, cancel func()) {
-	ch, done := make(chan *Ctx, 1), make(chan struct{})
+	// 保留扩容到 100，应对突发消息
+	ch, done := make(chan *Ctx, 100), make(chan struct{})
 	go func() {
 		defer close(ch)
 		in := make(chan *Ctx, 1)
@@ -61,9 +68,13 @@ func (n *FutureEvent) Repeat() (recv <-chan *Ctx, cancel func()) {
 			Priority: n.Priority,
 			Rules:    n.Rule,
 			Engine:   defaultEngine,
-			Handler: func(ctx *Ctx) {
-				in <- ctx
-			},
+			Handler: []Handler{func(ctx *Ctx) {
+				// 只要 Consumer 处理不是极度滞后，这种方式就能防止 Bot 核心被阻塞
+				go func() {
+					defer func() { _ = recover() }()
+					in <- ctx
+				}()
+			}},
 		})
 		for {
 			select {

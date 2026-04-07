@@ -3,6 +3,7 @@ package zero
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 
@@ -12,14 +13,14 @@ import (
 // Modified from https://github.com/catsworld/qq-bot-api
 
 // Params is the params of call api
-type Params map[string]interface{}
+type Params map[string]any
 
 // APIResponse is the response of calling API
 // https://github.com/botuniverse/onebot-11/blob/master/communication/ws.md
 type APIResponse struct {
 	Status  string       `json:"status"`
 	Data    gjson.Result `json:"data"`
-	Msg     string       `json:"msg"`
+	Message string       `json:"message"`
 	Wording string       `json:"wording"`
 	RetCode int64        `json:"retcode"`
 	Echo    uint64       `json:"echo"`
@@ -30,7 +31,16 @@ type APIResponse struct {
 type APIRequest struct {
 	Action string `json:"action"`
 	Params Params `json:"params"`
-	Echo   uint64 `json:"echo"` // 该项不用填写，由Driver生成
+	Echo   uint64 `json:"echo,omitempty"` // 该项不用填写，由Driver生成
+}
+
+func (ar *APIRequest) String() string {
+	sb := strings.Builder{}
+	err := json.NewEncoder(&sb).Encode(ar)
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 // User is a user on QQ.
@@ -38,21 +48,21 @@ type User struct {
 	// Private sender
 	// https://github.com/botuniverse/onebot-11/blob/master/event/message.md#%E7%A7%81%E8%81%8A%E6%B6%88%E6%81%AF
 	ID       int64  `json:"user_id"`
-	TinyID   string `json:"tiny_id"` // TinyID 在 guild 下为 ID 的 string
-	NickName string `json:"nickname"`
-	Sex      string `json:"sex"` // "male"、"female"、"unknown"
+	TinyID   string `json:"tiny_id,omitempty"` // TinyID 在 guild 下为 ID 的 string
+	NickName string `json:"nickname,omitempty"`
+	Sex      string `json:"sex,omitempty"` // "male"、"female"、"unknown"
 	Age      int    `json:"age"`
-	Area     string `json:"area"`
+	Area     string `json:"area,omitempty"`
 	// Group member
 	// https://github.com/botuniverse/onebot-11/blob/master/event/message.md#%E7%BE%A4%E6%B6%88%E6%81%AF
-	Card  string `json:"card"`
-	Title string `json:"title"`
-	Level string `json:"level"`
-	Role  string `json:"role"` // "owner"、"admin"、"member"
+	Card  string `json:"card,omitempty"`
+	Title string `json:"title,omitempty"`
+	Level string `json:"level,omitempty"`
+	Role  string `json:"role,omitempty"` // "owner"、"admin"、"member"
 	// Group anonymous
-	AnonymousID   int64  `json:"anonymous_id" anonymous:"id"`
-	AnonymousName string `json:"anonymous_name" anonymous:"name"`
-	AnonymousFlag string `json:"anonymous_flag" anonymous:"flag"`
+	AnonymousID   int64  `json:"anonymous_id,omitempty" anonymous:"id"`
+	AnonymousName string `json:"anonymous_name,omitempty" anonymous:"name"`
+	AnonymousFlag string `json:"anonymous_flag,omitempty" anonymous:"flag"`
 }
 
 // Event is the event emitted form cqhttp
@@ -62,7 +72,7 @@ type Event struct {
 	DetailType    string          `json:"-"`
 	MessageType   string          `json:"message_type"`
 	SubType       string          `json:"sub_type"`
-	MessageID     interface{}     `json:"-"`          // int64 in qq or string in guild
+	MessageID     any             `json:"-"`          // int64 in qq or string in guild
 	RawMessageID  json.RawMessage `json:"message_id"` // int64 in qq or string in guild
 	GroupID       int64           `json:"group_id"`
 	ChannelID     string          `json:"channel_id"`
@@ -73,7 +83,7 @@ type Event struct {
 	SelfID        int64           `json:"self_id"`
 	SelfTinyID    string          `json:"self_tiny_id"`
 	RawMessage    string          `json:"raw_message"` // raw_message is always string
-	Anonymous     interface{}     `json:"anonymous"`
+	Anonymous     any             `json:"anonymous"`
 	AnonymousFlag string          `json:"anonymous_flag"` // This field is deprecated and will get removed, see #11
 	Event         string          `json:"event"`
 	NoticeType    string          `json:"notice_type"` // This field is deprecated and will get removed, see #11
@@ -92,7 +102,7 @@ type Event struct {
 // Message 消息
 type Message struct {
 	Elements    message.Message
-	MessageId   message.MessageID
+	MessageID   message.ID
 	Sender      *User
 	MessageType string
 }
@@ -102,7 +112,7 @@ type File struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Size  int64  `json:"size"`
-	BusID int64  `json:"busid"`
+	BusID int64  `json:"busid,omitempty"`
 }
 
 // Group 群

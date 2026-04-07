@@ -10,7 +10,7 @@ import (
 )
 
 func TestFilter(t *testing.T) {
-	e := map[string]interface{}{
+	e := map[string]any{
 		"post_type": "notice",
 		"user_id":   "notice",
 	}
@@ -19,17 +19,17 @@ func TestFilter(t *testing.T) {
 	event := &zero.Event{
 		RawEvent: rawEvent,
 	}
-	result := Filter(
+	result := New(
 		func(ctx *zero.Ctx) gjson.Result {
 			return ctx.Event.RawEvent
 		},
-		Field("post_type").Any(
+		NewField("post_type").Any(
 			Equal("notice"),
 			Not(
 				In("message"),
 			),
 		),
-		Field("user_id").All(
+		NewField("user_id").All(
 			NotEqual("abs"),
 		),
 	)(&zero.Ctx{Event: event})

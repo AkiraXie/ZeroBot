@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/github/license/wdvxdr1123/ZeroBot.svg?style=flat-square&logo=gnu)](https://raw.githubusercontent.com/wdvxdr1123/ZeroBot/main/LICENSE)
 [![qq group](https://img.shields.io/badge/group-892659456-red?style=flat-square&logo=tencent-qq)](https://jq.qq.com/?_wv=1027&k=E6Zov6Fi)
 
-文档正在咕咕中, 具体使用可以参考example文件夹。
+
 
 ## ⚡️ 快速使用
 
@@ -34,16 +34,23 @@ func main() {
 			driver.NewWebSocketClient("ws://127.0.0.1:6700", ""),
 			// 反向 WS
 			driver.NewWebSocketServer(16, "ws://127.0.0.1:6701", ""),
+			// HTTP
+			driver.NewHTTPClient("http://127.0.0.1:6701", "", "http://127.0.0.1:6700", ""),
 		},
 	}, nil)
 }
 ```
 
+## 📖 文档
+
+[**--> 点击这里查看文档 <--**](https://wdvxdr1123.github.io/ZeroBot/)
+
 ## 🎯 特性
 
 - 通过 `init` 函数实现插件式
-- 底层与 Onebot 通信驱动可换，目前支持正向/反向WS，且支持基于 `unix socket` 的通信（使用 `ws+unix://`）
+- 底层与 Onebot 通信驱动可换，目前支持HTTP、正向/反向WS，且支持基于 `unix socket` 的通信（使用 `ws+unix://`）
 - 通过添加多个 driver 实现多Q机器人支持
+- 完整的 OneBot 11 标准 API + NapCat / NapNeko 扩展 API 支持
 
 ## 关联项目
 

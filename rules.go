@@ -12,8 +12,8 @@ import (
 )
 
 // Type check the ctx.Event's type
-func Type(type_ string) Rule {
-	t := strings.SplitN(type_, "/", 3)
+func Type(typ string) Rule {
+	t := strings.SplitN(typ, "/", 3)
 	return func(ctx *Ctx) bool {
 		if len(t) > 0 && t[0] != ctx.Event.PostType {
 			return false
@@ -174,9 +174,9 @@ func OnlyToMe(ctx *Ctx) bool {
 }
 
 // CheckUser only triggered by specific person
-func CheckUser(userId ...int64) Rule {
+func CheckUser(userID ...int64) Rule {
 	return func(ctx *Ctx) bool {
-		for _, uid := range userId {
+		for _, uid := range userID {
 			if ctx.Event.UserID == uid {
 				return true
 			}
@@ -186,9 +186,9 @@ func CheckUser(userId ...int64) Rule {
 }
 
 // CheckGroup only triggered in specific group
-func CheckGroup(grpId ...int64) Rule {
+func CheckGroup(grpID ...int64) Rule {
 	return func(ctx *Ctx) bool {
-		for _, gid := range grpId {
+		for _, gid := range grpID {
 			if ctx.Event.GroupID == gid {
 				return true
 			}
@@ -217,25 +217,28 @@ func OnlyGuild(ctx *Ctx) bool {
 	return ctx.Event.PostType == "message" && ctx.Event.DetailType == "guild"
 }
 
-// SuperUserPermission only triggered by the bot's owner
-func SuperUserPermission(ctx *Ctx) bool {
+func issu(id int64) bool {
 	for _, su := range BotConfig.SuperUsers {
-		if su == ctx.Event.UserID {
+		if su == id {
 			return true
 		}
 	}
 	return false
 }
 
+// SuperUserPermission only triggered by the bot's owner
+func SuperUserPermission(ctx *Ctx) bool {
+	return issu(ctx.Event.UserID)
+}
+
 // AdminPermission only triggered by the group admins or higher permission
 func AdminPermission(ctx *Ctx) bool {
-	return SuperUserPermission(ctx) || ctx.Event.Sender.Role != "member"
+	return SuperUserPermission(ctx) || ctx.Event.Sender.Role == "owner" || ctx.Event.Sender.Role == "admin"
 }
 
 // OwnerPermission only triggered by the group owner or higher permission
 func OwnerPermission(ctx *Ctx) bool {
-	return SuperUserPermission(ctx) ||
-		(ctx.Event.Sender.Role != "member" && ctx.Event.Sender.Role != "admin")
+	return SuperUserPermission(ctx) || ctx.Event.Sender.Role == "owner"
 }
 
 // UserOrGrpAdmin 允许用户单独使用或群管使用
@@ -244,6 +247,33 @@ func UserOrGrpAdmin(ctx *Ctx) bool {
 		return AdminPermission(ctx)
 	}
 	return OnlyToMe(ctx)
+}
+
+// GroupHigherPermission 群发送者权限高于 target
+//
+// 隐含 OnlyGroup 判断
+func GroupHigherPermission(gettarget func(ctx *Ctx) int64) Rule {
+	return func(ctx *Ctx) bool {
+		if !OnlyGroup(ctx) {
+			return false
+		}
+		target := gettarget(ctx)
+		if target == ctx.Event.UserID { // 特判, 自己和自己比
+			return false
+		}
+		if SuperUserPermission(ctx) {
+			sender := ctx.Event.UserID
+			return BotConfig.GetFirstSuperUser(sender, target) == sender
+		}
+		if ctx.Event.Sender.Role == "owner" {
+			return !issu(target) && ctx.GetThisGroupMemberInfo(target, false).Get("role").Str != "owner"
+		}
+		if ctx.Event.Sender.Role == "admin" {
+			tgtrole := ctx.GetThisGroupMemberInfo(target, false).Get("role").Str
+			return !issu(target) && tgtrole != "owner" && tgtrole != "admin"
+		}
+		return false // member is the lowest
+	}
 }
 
 // HasPicture 消息含有图片返回 true
@@ -270,7 +300,7 @@ func MustProvidePicture(ctx *Ctx) bool {
 	}
 	// 没有图片就索取
 	ctx.SendChain(message.Text("请发送一张图片"))
-	next := NewFutureEvent("message", 999, false, ctx.CheckSession(), HasPicture).Next()
+	next := NewFutureEvent("message", 999, true, ctx.CheckSession(), HasPicture).Next()
 	select {
 	case <-time.After(time.Second * 120):
 		return false

@@ -51,6 +51,10 @@ func (evr *eventRing) processEvent(response []byte, caller APICaller) {
 func (evr *eventRing) loop(latency, maxwait time.Duration, process func([]byte, APICaller, time.Duration)) {
 	go func(r []*eventRingItem) {
 		c := uintptr(0)
+		if latency < time.Millisecond {
+			latency = time.Millisecond
+		}
+		totl := time.Duration(0)
 		for range time.NewTicker(latency).C {
 			i := c % uintptr(len(r))
 			it := (*eventRingItem)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&r[i]))))
@@ -58,11 +62,15 @@ func (evr *eventRing) loop(latency, maxwait time.Duration, process func([]byte, 
 				continue
 			}
 			process(it.response, it.caller, maxwait)
+			atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&r[i])), unsafe.Pointer(nil))
 			it.response = nil
 			it.caller = nil
-			atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&r[i])), unsafe.Pointer(nil))
 			c++
-			runtime.GC()
+			totl += latency
+			if totl > time.Second {
+				totl = 0
+				runtime.GC()
+			}
 		}
 	}(evr.r)
 }

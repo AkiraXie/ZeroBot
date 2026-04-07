@@ -1,9 +1,9 @@
 package zero
 
 import (
+	"context"
 	"encoding/json"
 	"hash/crc64"
-	"math/rand"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -19,23 +19,32 @@ import (
 	"github.com/wdvxdr1123/ZeroBot/utils/helper"
 )
 
+const (
+	StateKeyPrefixKeep     = "__zerobot_keep_"
+	StateKeyEventIndex     = StateKeyPrefixKeep + "_zerobot_ev_idx__"
+	stateKeyNoLogMseeageID = "__zerobot_no_log_mseeage_id__"
+)
+
 // Config is config of zero bot
 type Config struct {
-	NickName       []string      `json:"nickname"`         // 机器人名称
-	CommandPrefix  string        `json:"command_prefix"`   // 触发命令
-	SuperUsers     []int64       `json:"super_users"`      // 超级用户
-	RingLen        uint          `json:"ring_len"`         // 事件环长度 (默认关闭)
-	Latency        time.Duration `json:"latency"`          // 事件处理延迟 (延迟 latency + (0~100ms) 再处理事件) (默认为0)
-	MaxProcessTime time.Duration `json:"max_process_time"` // 事件最大处理时间 (默认4min)
-	Driver         []Driver      `json:"-"`                // 通信驱动
+	NickName        []string      `json:"nickname"`           // 机器人名称
+	CommandPrefix   string        `json:"command_prefix"`     // 触发命令
+	SuperUsers      []int64       `json:"super_users"`        // 超级用户
+	RingLen         uint          `json:"ring_len"`           // 事件环长度 (默认关闭)
+	Latency         time.Duration `json:"latency"`            // 事件处理延迟 (延迟 latency 再处理事件，在 ring 模式下不可低于 1ms)
+	MaxProcessTime  time.Duration `json:"max_process_time"`   // 事件最大处理时间 (默认4min)
+	MarkMessage     bool          `json:"mark_message"`       // 自动标记消息为已读
+	KeepAtMeMessage bool          `json:"keep_at_me_message"` // 是否保留at me的原始消息
+	AddSpaceAfterAt bool          `json:"at_space"`           // 是否在At消息后没有空格时自动添加空格
+	Driver          []Driver      `json:"-"`                  // 通信驱动
 }
 
 // APICallers 所有的APICaller列表， 通过self-ID映射
 var APICallers callerMap
 
-// APICaller is the interface of CallApi
+// APICaller is the interface of CallAPI
 type APICaller interface {
-	CallApi(request APIRequest) (APIResponse, error)
+	CallAPI(c context.Context, request APIRequest) (APIResponse, error)
 }
 
 // Driver 与OneBot通信的驱动，使用driver.DefaultWebSocketDriver
@@ -50,6 +59,7 @@ var BotConfig Config
 var (
 	evring    eventRing // evring 事件环
 	isrunning uintptr
+	recvevcnt uintptr // evcnt 总的接收事件计数器
 )
 
 func runinit(op *Config) {
@@ -125,23 +135,29 @@ func RunAndBlock(op *Config, preblock func()) {
 }
 
 var (
-	triggeredMessages   = ttl.NewCache[int64, []message.MessageID](time.Minute * 5)
+	triggeredMessages   = ttl.NewCache[int64, []message.ID](time.Minute * 5)
 	triggeredMessagesMu = sync.Mutex{}
 )
 
 type messageLogger struct {
-	msgid  message.MessageID
+	msgid  message.ID
 	caller APICaller
 }
 
-// CallApi 记录被触发的回复消息
-func (m *messageLogger) CallApi(request APIRequest) (rsp APIResponse, err error) {
-	rsp, err = m.caller.CallApi(request)
+// CallAPI 记录被触发的回复消息
+func (m *messageLogger) CallAPI(ctx context.Context, request APIRequest) (rsp APIResponse, err error) {
+	noLog := false
+	b, ok := request.Params[stateKeyNoLogMseeageID].(bool)
+	if ok {
+		noLog = b
+		delete(request.Params, stateKeyNoLogMseeageID)
+	}
+	rsp, err = m.caller.CallAPI(ctx, request)
 	if err != nil {
 		return
 	}
 	id := rsp.Data.Get("message_id")
-	if id.Exists() {
+	if id.Exists() && !noLog {
 		mid := m.msgid.ID()
 		triggeredMessagesMu.Lock()
 		defer triggeredMessagesMu.Unlock()
@@ -156,7 +172,7 @@ func (m *messageLogger) CallApi(request APIRequest) (rsp APIResponse, err error)
 }
 
 // GetTriggeredMessages 获取被 id 消息触发的回复消息 id
-func GetTriggeredMessages(id message.MessageID) []message.MessageID {
+func GetTriggeredMessages(id message.ID) []message.ID {
 	triggeredMessagesMu.Lock()
 	defer triggeredMessagesMu.Unlock()
 	return triggeredMessages.Get(id.ID())
@@ -167,7 +183,7 @@ func processEventAsync(response []byte, caller APICaller, maxwait time.Duration)
 	var event Event
 	_ = json.Unmarshal(response, &event)
 	event.RawEvent = gjson.Parse(helper.BytesToString(response))
-	var msgid message.MessageID
+	var msgid message.ID
 	messageID, err := strconv.ParseInt(helper.BytesToString(event.RawMessageID), 10, 64)
 	if err == nil {
 		event.MessageID = messageID
@@ -199,6 +215,8 @@ func processEventAsync(response []byte, caller APICaller, maxwait time.Duration)
 		msgid = message.NewMessageIDFromString(event.MessageID.(string))
 	}
 
+	idx := atomic.AddUintptr(&recvevcnt, 1)
+
 	switch event.PostType { // process DetailType
 	case "message", "message_sent":
 		event.DetailType = event.MessageType
@@ -209,11 +227,11 @@ func processEventAsync(response []byte, caller APICaller, maxwait time.Duration)
 		event.DetailType = event.RequestType
 	}
 	if event.PostType == "message" {
-		preprocessMessageEvent(&event)
+		preprocessMessageEvent(&event, idx)
 	}
 	ctx := &Ctx{
 		Event:  &event,
-		State:  State{},
+		State:  State{StateKeyEventIndex: idx},
 		caller: &messageLogger{msgid: msgid, caller: caller},
 	}
 	matcherLock.Lock()
@@ -223,18 +241,21 @@ func processEventAsync(response []byte, caller APICaller, maxwait time.Duration)
 		hasMatcherListChanged = false
 	}
 	matcherLock.Unlock()
-	go match(ctx, matcherListForRanging, maxwait)
+	go match(ctx, idx, matcherListForRanging, maxwait)
 }
 
-// match 延迟 (1~100ms) 再处理事件
-func match(ctx *Ctx, matchers []*Matcher, maxwait time.Duration) {
+// match 匹配规则，处理事件
+func match(ctx *Ctx, idx uintptr, matchers []*Matcher, maxwait time.Duration) {
+	if BotConfig.MarkMessage && ctx.Event.MessageID != nil {
+		go ctx.MarkThisMessageAsRead()
+	}
 	gorule := func(rule Rule) <-chan bool {
 		ch := make(chan bool, 1)
 		go func() {
 			defer func() {
 				close(ch)
 				if pa := recover(); pa != nil {
-					log.Errorf("[bot] execute rule err: %v\n%v", pa, helper.BytesToString(debug.Stack()))
+					log.Errorf("[bot] [%d] execute rule err: %v\n%v", idx, pa, helper.BytesToString(debug.Stack()))
 				}
 			}()
 			ch <- rule(ctx)
@@ -247,7 +268,7 @@ func match(ctx *Ctx, matchers []*Matcher, maxwait time.Duration) {
 			defer func() {
 				close(ch)
 				if pa := recover(); pa != nil {
-					log.Errorf("[bot] execute handler err: %v\n%v", pa, helper.BytesToString(debug.Stack()))
+					log.Errorf("[bot] [%d] execute handler err: %v\n%v", idx, pa, helper.BytesToString(debug.Stack()))
 				}
 			}()
 			h(ctx)
@@ -255,7 +276,6 @@ func match(ctx *Ctx, matchers []*Matcher, maxwait time.Duration) {
 		}()
 		return ch
 	}
-	time.Sleep(time.Duration(rand.Intn(100)+1) * time.Millisecond)
 	t := time.NewTimer(maxwait)
 	defer t.Stop()
 loop:
@@ -264,7 +284,9 @@ loop:
 			continue
 		}
 		for k := range ctx.State { // Clear State
-			delete(ctx.State, k)
+			if !strings.HasPrefix(k, StateKeyPrefixKeep) {
+				delete(ctx.State, k)
+			}
 		}
 		m := matcher.copy()
 		ctx.ma = m
@@ -285,9 +307,10 @@ loop:
 					case <-t.C:
 						if m.NoTimeout { // 不设超时限制
 							t.Reset(maxwait)
+							log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "preHandler 处理达到最大时延, 但用户禁止退出")
 							continue
 						}
-						log.Warnln("[bot] preHandler 处理达到最大时延, 退出")
+						log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "preHandler 处理达到最大时延, 退出")
 						break loop
 					}
 					break
@@ -309,14 +332,14 @@ loop:
 				case <-t.C:
 					if m.NoTimeout { // 不设超时限制
 						t.Reset(maxwait)
+						log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "rule 处理达到最大时延, 但用户禁止退出")
 						continue
 					}
-					log.Warnln("[bot] rule 处理达到最大时延, 退出")
+					log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "rule 处理达到最大时延, 退出")
 					break loop
 				}
 				break
 			}
-
 		}
 
 		// mid handler
@@ -335,9 +358,10 @@ loop:
 					case <-t.C:
 						if m.NoTimeout { // 不设超时限制
 							t.Reset(maxwait)
+							log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "midHandler 处理达到最大时延, 但用户禁止退出")
 							continue
 						}
-						log.Warnln("[bot] midHandler 处理达到最大时延, 退出")
+						log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "midHandler 处理达到最大时延, 退出")
 						break loop
 					}
 					break
@@ -345,24 +369,28 @@ loop:
 			}
 		}
 
-		if m.Handler != nil {
-			c := gohandler(m.Handler)
-			for {
-				select {
-				case <-c: // 处理事件
-				case <-t.C:
-					if m.NoTimeout { // 不设超时限制
-						t.Reset(maxwait)
-						continue
-					}
-					log.Warnln("[bot] Handler 处理达到最大时延, 退出")
-					break loop
-				}
-				break
-			}
-		}
-		if matcher.Temp { // 临时 Matcher 删除
+		if matcher.Temp { // 已经匹配上, 临时 Matcher 删除
 			matcher.Delete()
+		}
+
+		if m.Handler != nil {
+			for _, handler := range m.Handler {
+				c := gohandler(handler)
+				for {
+					select {
+					case <-c: // 处理事件
+					case <-t.C:
+						if m.NoTimeout { // 不设超时限制
+							t.Reset(maxwait)
+							log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "Handler 处理达到最大时延, 但用户禁止退出")
+							continue
+						}
+						log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "Handler 处理达到最大时延, 退出")
+						break loop
+					}
+					break
+				}
+			}
 		}
 
 		if m.Engine != nil {
@@ -375,9 +403,10 @@ loop:
 					case <-t.C:
 						if m.NoTimeout { // 不设超时限制
 							t.Reset(maxwait)
+							log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "postHandler 处理达到最大时延, 但用户禁止退出")
 							continue
 						}
-						log.Warnln("[bot] postHandler 处理达到最大时延, 退出")
+						log.Warnln("[bot]", "["+strconv.FormatUint(uint64(idx), 10)+"]", "postHandler 处理达到最大时延, 退出")
 						break loop
 					}
 					break
@@ -392,22 +421,41 @@ loop:
 }
 
 // preprocessMessageEvent 返回信息事件
-func preprocessMessageEvent(e *Event) {
-	e.Message = message.ParseMessage(e.NativeMessage)
+func preprocessMessageEvent(e *Event, idx uintptr) {
+	msgs := message.ParseMessage(e.NativeMessage)
+
+	if len(msgs) > 0 {
+		filtered := make([]message.Segment, 0, len(msgs))
+		// trim space after at and remove empty text segment
+		for i := range msgs {
+			if i < len(msgs)-1 && msgs[i].Type == "at" && msgs[i+1].Type == "text" {
+				msgs[i+1].Data["text"] = strings.TrimLeft(msgs[i+1].Data["text"], " ")
+			}
+			if msgs[i].Type != "text" || msgs[i].Data["text"] != "" {
+				filtered = append(filtered, msgs[i])
+			}
+		}
+		e.Message = filtered
+	}
 
 	processAt := func() { // 处理是否at机器人
 		e.IsToMe = false
+		if len(e.Message) == 0 {
+			return
+		}
 		for i, m := range e.Message {
 			if m.Type == "at" {
 				qq, _ := strconv.ParseInt(m.Data["qq"], 10, 64)
 				if qq == e.SelfID {
 					e.IsToMe = true
-					e.Message = append(e.Message[:i], e.Message[i+1:]...)
+					if !BotConfig.KeepAtMeMessage {
+						e.Message = append(e.Message[:i], e.Message[i+1:]...)
+					}
 					return
 				}
 			}
 		}
-		if e.Message == nil || len(e.Message) == 0 || e.Message[0].Type != "text" {
+		if len(e.Message) == 0 || e.Message[0].Type != "text" {
 			return
 		}
 		first := e.Message[0]
@@ -424,14 +472,14 @@ func preprocessMessageEvent(e *Event) {
 
 	switch {
 	case e.DetailType == "group":
-		log.Infof("[bot] 收到群(%v)消息 %v : %v", e.GroupID, e.Sender.String(), e.RawMessage)
+		log.Infof("[bot] [%d] 收到群(%v)消息 %v : %v", idx, e.GroupID, e.Sender.String(), e.RawMessage)
 		processAt()
 	case e.DetailType == "guild" && e.SubType == "channel":
-		log.Infof("[bot] 收到频道(%v)(%v-%v)消息 %v : %v", e.GroupID, e.GuildID, e.ChannelID, e.Sender.String(), e.Message)
+		log.Infof("[bot] [%d] 收到频道(%v)(%v-%v)消息 %v : %v", idx, e.GroupID, e.GuildID, e.ChannelID, e.Sender.String(), e.Message)
 		processAt()
 	default:
 		e.IsToMe = true // 私聊也判断为at
-		log.Infof("[bot] 收到私聊消息 %v : %v", e.Sender.String(), e.RawMessage)
+		log.Infof("[bot] [%d] 收到私聊消息 %v : %v", idx, e.Sender.String(), e.RawMessage)
 	}
 	if len(e.Message) > 0 && e.Message[0].Type == "text" { // Trim Again!
 		e.Message[0].Data["text"] = strings.TrimLeft(e.Message[0].Data["text"], " ")
@@ -463,4 +511,20 @@ func RangeBot(iter func(id int64, ctx *Ctx) bool) {
 	APICallers.Range(func(key int64, value APICaller) bool {
 		return iter(key, &Ctx{caller: value})
 	})
+}
+
+// GetFirstSuperUser 在 qqs 中获得 SuperUsers 列表的首个 qq
+//
+// 找不到返回 -1
+func (op *Config) GetFirstSuperUser(qqs ...int64) int64 {
+	m := make(map[int64]struct{}, len(qqs)*4)
+	for _, qq := range qqs {
+		m[qq] = struct{}{}
+	}
+	for _, qq := range op.SuperUsers {
+		if _, ok := m[qq]; ok {
+			return qq
+		}
+	}
+	return -1
 }

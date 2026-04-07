@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"unsafe"
 
 	"github.com/wdvxdr1123/ZeroBot/message"
 )
@@ -26,6 +27,11 @@ func (ctx *Ctx) GetMatcher() *Matcher {
 	return ctx.ma
 }
 
+// ExposeCaller as *T, maybe panic if misused
+func ExposeCaller[T any](ctx *Ctx) *T {
+	return (*T)(*(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&ctx.caller), unsafe.Sizeof(uintptr(0)))))
+}
+
 // decoder 反射获取的数据
 type decoder []dec
 
@@ -38,7 +44,7 @@ type dec struct {
 var decoderCache = sync.Map{}
 
 // Parse 将 Ctx.State 映射到结构体
-func (ctx *Ctx) Parse(model interface{}) (err error) {
+func (ctx *Ctx) Parse(model any) (err error) {
 	var (
 		rv       = reflect.ValueOf(model).Elem()
 		t        = rv.Type()
@@ -80,8 +86,9 @@ func (ctx *Ctx) CheckSession() Rule {
 }
 
 // Send 快捷发送消息/合并转发
-func (ctx *Ctx) Send(msg interface{}) message.MessageID {
+func (ctx *Ctx) Send(msg any) message.ID {
 	event := ctx.Event
+
 	m, ok := msg.(message.Message)
 	if !ok {
 		var p *message.Message
@@ -90,34 +97,89 @@ func (ctx *Ctx) Send(msg interface{}) message.MessageID {
 			m = *p
 		}
 	}
+
+	// 合并转发
 	if ok && len(m) > 0 && m[0].Type == "node" && event.DetailType != "guild" {
-		if event.GroupID != 0 {
-			return message.NewMessageIDFromInteger(ctx.SendGroupForwardMessage(event.GroupID, m).Get("message_id").Int())
+
+		switch event.MessageType {
+		case "group":
+			return message.NewMessageIDFromInteger(
+				ctx.SendGroupForwardMessage(event.GroupID, m).Get("message_id").Int(),
+			)
+
+		case "private":
+			return message.NewMessageIDFromInteger(
+				ctx.SendPrivateForwardMessage(event.UserID, m).Get("message_id").Int(),
+			)
 		}
-		return message.NewMessageIDFromInteger(ctx.SendPrivateForwardMessage(event.UserID, m).Get("message_id").Int())
+		if event.GroupID != 0 {
+			return message.NewMessageIDFromInteger(
+				ctx.SendGroupForwardMessage(event.GroupID, m).Get("message_id").Int(),
+			)
+		}
+		return message.NewMessageIDFromInteger(
+			ctx.SendPrivateForwardMessage(event.UserID, m).Get("message_id").Int(),
+		)
 	}
+
 	if event.DetailType == "guild" {
-		return message.NewMessageIDFromString(ctx.SendGuildChannelMessage(event.GuildID, event.ChannelID, msg))
+		return message.NewMessageIDFromString(
+			ctx.SendGuildChannelMessage(event.GuildID, event.ChannelID, msg),
+		)
+	}
+
+	switch event.MessageType {
+	case "group":
+		return message.NewMessageIDFromInteger(
+			ctx.SendGroupMessage(event.GroupID, msg),
+		)
+	case "private":
+		return message.NewMessageIDFromInteger(
+			ctx.SendPrivateMessage(event.UserID, msg),
+		)
 	}
 	if event.GroupID != 0 {
-		return message.NewMessageIDFromInteger(ctx.SendGroupMessage(event.GroupID, msg))
+		return message.NewMessageIDFromInteger(
+			ctx.SendGroupMessage(event.GroupID, msg),
+		)
 	}
-	return message.NewMessageIDFromInteger(ctx.SendPrivateMessage(event.UserID, msg))
+	return message.NewMessageIDFromInteger(
+		ctx.SendPrivateMessage(event.UserID, msg),
+	)
 }
 
 // SendChain 快捷发送消息/合并转发-消息链
-func (ctx *Ctx) SendChain(msg ...message.MessageSegment) message.MessageID {
+func (ctx *Ctx) SendChain(msg ...message.Segment) message.ID {
+	if BotConfig.AddSpaceAfterAt && len(msg) > 0 {
+		newMsg := make(message.Message, 0, len(msg)*2)
+		for i := 0; i < len(msg)-1; i++ {
+			newMsg = append(newMsg, msg[i])
+			if msg[i].Type != "at" {
+				continue
+			}
+			if msg[i+1].Type != "text" ||
+				(len(msg[i+1].Data["text"]) > 0 && msg[i+1].Data["text"][0] != ' ') {
+				newMsg = append(newMsg, message.Text(" "))
+			}
+		}
+		newMsg = append(newMsg, msg[len(msg)-1])
+		msg = newMsg
+	}
 	return ctx.Send((message.Message)(msg))
 }
 
 // Echo 向自身分发虚拟事件
 func (ctx *Ctx) Echo(response []byte) {
-	evring.processEvent(response, ctx.caller)
+	if BotConfig.RingLen != 0 {
+		evring.processEvent(response, ctx.caller)
+	} else {
+		processEventAsync(response, ctx.caller, BotConfig.MaxProcessTime)
+	}
 }
 
 // FutureEvent ...
-func (ctx *Ctx) FutureEvent(Type string, rule ...Rule) *FutureEvent {
-	return ctx.ma.FutureEvent(Type, rule...)
+func (ctx *Ctx) FutureEvent(typ string, rule ...Rule) *FutureEvent {
+	return ctx.ma.FutureEvent(typ, rule...)
 }
 
 // Get ..
